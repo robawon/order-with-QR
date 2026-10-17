@@ -1,0 +1,87 @@
+import { NextResponse } from 'next/server';
+import { verifyStaffSession, getServiceRoleClient } from '../../../../../lib/supabaseServer';
+
+const RESERVED_SLUGS = ['admin', 'login', 'bartender', 'super', 'api'];
+
+export async function PATCH(req, { params }) {
+  try {
+    const { id } = params;
+    await verifyStaffSession(req, ['super_admin']);
+    const supabaseAdmin = getServiceRoleClient();
+
+    const body = await req.json();
+    const {
+      name,
+      slug,
+      active,
+      max_tables,
+      languages,
+      default_language,
+      currency,
+      active_until,
+    } = body;
+
+    const updates = {};
+    if (name !== undefined) updates.name = name.trim();
+    if (active !== undefined) updates.active = Boolean(active);
+    if (max_tables !== undefined) updates.max_tables = max_tables ? Number(max_tables) : null;
+    if (languages !== undefined) updates.languages = languages;
+    if (default_language !== undefined) updates.default_language = default_language;
+    if (currency !== undefined) updates.currency = currency;
+
+    if (slug !== undefined) {
+      const cleanSlug = slug.toLowerCase().trim();
+      if (!/^[a-z0-9-]+$/.test(cleanSlug)) {
+        return NextResponse.json({ success: false, error: 'Slug must contain only lowercase letters, numbers, and hyphens' }, { status: 400 });
+      }
+      if (RESERVED_SLUGS.includes(cleanSlug)) {
+        return NextResponse.json({ success: false, error: `The slug "${cleanSlug}" is reserved` }, { status: 400 });
+      }
+
+      // Check uniqueness if slug changed
+      const { data: existing } = await supabaseAdmin
+        .from('cafes')
+        .select('id')
+        .eq('slug', cleanSlug)
+        .neq('id', id)
+        .maybeSingle();
+
+      if (existing) {
+        return NextResponse.json({ success: false, error: 'A cafe with this slug already exists' }, { status: 400 });
+      }
+      updates.slug = cleanSlug;
+    }
+
+    if (Object.keys(updates).length > 0) {
+      const { error: updateError } = await supabaseAdmin
+        .from('cafes')
+        .update(updates)
+        .eq('id', id);
+
+      if (updateError) {
+        return NextResponse.json({ success: false, error: updateError.message }, { status: 400 });
+      }
+    }
+
+    // Update billing active_until if provided
+    if (active_until !== undefined) {
+      const { error: billError } = await supabaseAdmin
+        .from('cafe_billing')
+        .upsert({
+          cafe_id: id,
+          active_until: new Date(active_until).toISOString(),
+        });
+
+      if (billError) {
+        return NextResponse.json({ success: false, error: billError.message }, { status: 400 });
+      }
+    }
+
+    return NextResponse.json({ success: true, message: 'Cafe updated successfully' });
+  } catch (err) {
+    return NextResponse.json(
+      { success: false, error: err.message },
+      { status: err.status || 500 }
+    );
+  }
+}
